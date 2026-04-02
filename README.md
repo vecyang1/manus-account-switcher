@@ -2,7 +2,8 @@
 
 CLI tool to manage multiple [Manus AI](https://manus.im) desktop accounts on macOS. Switch between accounts without logging out, check live credit balances, and auto-checkin daily.
 
-![Manus Account Manager](assets/screenshot.svg)
+<img width="603" height="766" alt="image" src="https://github.com/user-attachments/assets/58a1d194-90fa-49e5-949b-016cf505bb3e" />
+
 
 ## How it works
 
