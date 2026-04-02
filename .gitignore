@@ -1,0 +1,4 @@
+.profiles
+*.log
+.DS_Store
+electron-reverse-engineer.skill
