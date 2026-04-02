@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="322">
+  <rect width="700" height="322" rx="10" fill="#1e1e2e"/>
+  <!-- Title bar -->
+  <circle cx="20" cy="18" r="6" fill="#ff5f57"/>
+  <circle cx="40" cy="18" r="6" fill="#febc2e"/>
+  <circle cx="60" cy="18" r="6" fill="#28c840"/>
+  <text x="350" y="20" fill="#888" font-family="monospace" font-size="12" text-anchor="middle">manus — Manus Account Manager</text>
+  <line x1="0" y1="34" x2="700" y2="34" stroke="#333" stroke-width="1"/>
+  <text x="20" y="54" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13"><tspan fill="#89dceb" font-weight="bold">======= Manus Account Manager =======</tspan></text>
+  <text x="20" y="76" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13"></text>
+  <text x="20" y="98" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">   <tspan fill="#89b4fa">1</tspan>  default       <tspan fill="#a6e3a1">[logged in]</tspan> expires 2026-07-01 (89d)</text>
+  <text x="20" y="120" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">                    MitchellGarcia8080@hotmail.com [pwd saved]</text>
+  <text x="20" y="142" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">                    Main account (original)</text>
+  <text x="20" y="164" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">                    <tspan fill="#a6e3a1">92 credits</tspan> | daily: 300/300 left  <tspan fill="#666">PRO</tspan> (Trialing)</text>
+  <text x="20" y="186" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13"></text>
+  <text x="20" y="208" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">   <tspan fill="#89b4fa">2</tspan>  DylanRivera7953  <tspan fill="#a6e3a1">[logged in]</tspan> expires 2026-07-01 (89d)</text>
+  <text x="20" y="230" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">                    DylanRivera7953@hotmail.com [pwd saved]</text>
+  <text x="20" y="252" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">                    260402</text>
+  <text x="20" y="274" fill="#cdd6f4" font-family="'SF Mono','Fira Code',monospace" font-size="13">                    <tspan fill="#a6e3a1">4500 credits</tspan> | daily: 300/300 left  <tspan fill="#666">PRO</tspan> (Trialing)</text>
+</svg>
