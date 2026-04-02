@@ -2,6 +2,11 @@
 
 CLI tool to manage multiple [Manus AI](https://manus.im) desktop accounts on macOS. Switch between accounts without logging out, check live credit balances, and auto-checkin daily.
 
+<img width="628" height="517" alt="iTerm2 2026-04-02 18 25 37" src="https://github.com/user-attachments/assets/87b91996-0e4e-423b-b1b2-27b328db7bcb" />
+
+<img width="1280" height="840" alt="WeChat 2026-04-02 18 32 11" src="https://github.com/user-attachments/assets/de1bb2b0-12c3-4414-bdb7-3cc64993b8d6" />
+
+
 <img width="603" height="766" alt="image" src="https://github.com/user-attachments/assets/58a1d194-90fa-49e5-949b-016cf505bb3e" />
 
 
