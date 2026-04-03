@@ -531,6 +531,9 @@ switch_profile() {
             printf "%s\n" "${YELLOW}Login with: $email / $pwd${NC}"
         fi
     fi
+
+    # Auto-sync knowledge from the largest knowledge pool
+    auto_sync_knowledge "$index"
 }
 
 # ━━━ Interactive menu ━━━
@@ -544,6 +547,7 @@ interactive_pick() {
     printf "    ${BLUE}s1-%s${NC}    Switch (close all, open one)\n" "$count"
     printf "    ${BLUE}i${NC}[num]  Account info\n"
     printf "    ${BLUE}c${NC}[num]  Show credentials\n"
+    printf "    ${BLUE}k${NC}       Knowledge entries\n"
     printf "    ${BLUE}a${NC}       Add new account\n"
     printf "    ${BLUE}q${NC}       Quit\n"
     echo ""
@@ -560,6 +564,10 @@ interactive_pick() {
             read -rp "  Description (optional): " pdesc
             add_profile "$pemail" "$ppwd" "$pname" "$pdesc"
             echo ""
+            interactive_pick
+            ;;
+        k|K)
+            show_knowledge
             interactive_pick
             ;;
         i|I)
@@ -708,6 +716,531 @@ checkin_log() {
     tail -n "$lines" "$CHECKIN_LOG"
 }
 
+# ━━━ Knowledge API ━━━
+KNOWLEDGE_DIR="$PROFILES_DIR/.knowledge"
+
+api_list_knowledge() {
+    local token="$1"
+    [[ -z "$token" ]] && return
+    curl -s -X POST "$MANUS_API/knowledge.v1.KnowledgeService/ListKnowledge" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d '{"limit": 100}' 2>/dev/null
+}
+
+api_create_knowledge() {
+    local token="$1" name="$2" content="$3" trigger="$4"
+    [[ -z "$token" ]] && return
+    local payload
+    payload=$(python3 -c "
+import json
+print(json.dumps({
+    'name': '''$name''',
+    'content': '''$content''',
+    'trigger': '''$trigger'''
+}))
+" 2>/dev/null)
+    curl -s -X POST "$MANUS_API/knowledge.v1.KnowledgeService/CreateKnowledge" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d "$payload" 2>/dev/null
+}
+
+api_delete_knowledge() {
+    local token="$1" uid="$2"
+    [[ -z "$token" ]] && return
+    curl -s -X POST "$MANUS_API/knowledge.v1.KnowledgeService/DeleteKnowledge" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d "{\"uid\":\"$uid\"}" 2>/dev/null
+}
+
+# ━━━ Knowledge: list for a profile ━━━
+show_knowledge() {
+    local index="${1:-}"
+    if [[ -z "$index" ]]; then
+        # Show all profiles
+        local i=1
+        local count
+        count=$(get_profile_count)
+        while (( i <= count )); do
+            show_profile_knowledge "$i"
+            echo ""
+            ((i++))
+        done
+        return
+    fi
+    show_profile_knowledge "$index"
+}
+
+show_profile_knowledge() {
+    local index="$1"
+    local line
+    line=$(get_profile_by_index "$index")
+    if [[ -z "$line" ]]; then
+        printf "%s\n" "${RED}Invalid profile #${index}${NC}"
+        return 1
+    fi
+
+    local name path email desc
+    IFS='|' read -r name path email desc <<< "$line"
+
+    local token
+    token=$(get_token_from_profile "$path")
+    if [[ -z "$token" ]]; then
+        printf "  %s: ${YELLOW}not logged in${NC}\n" "$name"
+        return
+    fi
+
+    local kdata
+    kdata=$(api_list_knowledge "$token")
+
+    python3 << PYEOF
+import json
+data = json.loads('''$kdata''')
+entries = data.get("knowledge", [])
+total = data.get("total", len(entries))
+print(f"\033[0;36m--- $name: {total} knowledge entries ---\033[0m")
+if not entries:
+    print("  \033[2m(empty)\033[0m")
+else:
+    for k in entries:
+        kname = k.get("name", "")
+        content = k.get("content", "")
+        trigger = k.get("trigger", "")
+        enabled = k.get("enabled", True)
+        status = "\033[0;32m[on]\033[0m" if enabled else "\033[0;31m[off]\033[0m"
+        print(f"  {status} {kname}")
+        if trigger:
+            print(f"       \033[2mWhen: {trigger}\033[0m")
+        if content:
+            preview = content[:120] + "..." if len(content) > 120 else content
+            print(f"       {preview}")
+PYEOF
+}
+
+# ━━━ Knowledge: export from a profile to JSON file ━━━
+export_knowledge() {
+    local index="${1:?Usage: manus kexport <profile#> [output.json]}"
+    local outfile="${2:-}"
+    local line
+    line=$(get_profile_by_index "$index")
+    if [[ -z "$line" ]]; then
+        printf "%s\n" "${RED}Invalid profile #${index}${NC}"
+        return 1
+    fi
+
+    local name path email desc
+    IFS='|' read -r name path email desc <<< "$line"
+
+    local token
+    token=$(get_token_from_profile "$path")
+    if [[ -z "$token" ]]; then
+        printf "%s\n" "${RED}Profile '$name' not logged in.${NC}"
+        return 1
+    fi
+
+    local kdata
+    kdata=$(api_list_knowledge "$token")
+
+    mkdir -p "$KNOWLEDGE_DIR"
+    if [[ -z "$outfile" ]]; then
+        outfile="$KNOWLEDGE_DIR/${name}_$(date '+%Y%m%d_%H%M%S').json"
+    fi
+
+    echo "$kdata" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+entries = data.get('knowledge', [])
+# Strip server-only fields, keep portable ones
+export = []
+for k in entries:
+    export.append({
+        'name': k.get('name', ''),
+        'content': k.get('content', ''),
+        'trigger': k.get('trigger', ''),
+    })
+with open('$outfile', 'w') as f:
+    json.dump({'source': '$name', 'exported_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'knowledge': export}, f, indent=2)
+print(f'Exported {len(export)} entries')
+" 2>/dev/null
+
+    printf "%s\n" "${GREEN}Exported to: $outfile${NC}"
+}
+
+# ━━━ Knowledge: import into a profile from JSON file ━━━
+import_knowledge() {
+    local index="${1:?Usage: manus kimport <profile#> <input.json>}"
+    local infile="${2:?JSON file required}"
+    local line
+    line=$(get_profile_by_index "$index")
+    if [[ -z "$line" ]]; then
+        printf "%s\n" "${RED}Invalid profile #${index}${NC}"
+        return 1
+    fi
+
+    local name path email desc
+    IFS='|' read -r name path email desc <<< "$line"
+
+    local token
+    token=$(get_token_from_profile "$path")
+    if [[ -z "$token" ]]; then
+        printf "%s\n" "${RED}Profile '$name' not logged in.${NC}"
+        return 1
+    fi
+
+    if [[ ! -f "$infile" ]]; then
+        printf "%s\n" "${RED}File not found: $infile${NC}"
+        return 1
+    fi
+
+    # Get existing knowledge to avoid duplicates
+    local existing
+    existing=$(api_list_knowledge "$token")
+
+    python3 << PYEOF
+import json, subprocess, sys
+
+with open("$infile") as f:
+    data = json.load(f)
+
+entries = data.get("knowledge", [])
+existing = json.loads('''$existing''')
+existing_names = {k.get("name", "") for k in existing.get("knowledge", [])}
+
+imported = 0
+skipped = 0
+for entry in entries:
+    name = entry.get("name", "")
+    if name in existing_names:
+        print(f"  SKIP (exists): {name}")
+        skipped += 1
+        continue
+
+    payload = json.dumps({
+        "name": name,
+        "content": entry.get("content", ""),
+        "trigger": entry.get("trigger", ""),
+    })
+    result = subprocess.run([
+        "curl", "-s", "-X", "POST",
+        "$MANUS_API/knowledge.v1.KnowledgeService/CreateKnowledge",
+        "-H", "Authorization: Bearer $token",
+        "-H", "Content-Type: application/json",
+        "-d", payload
+    ], capture_output=True, text=True)
+    print(f"  \033[0;32mIMPORTED\033[0m: {name}")
+    imported += 1
+
+print(f"\nDone: {imported} imported, {skipped} skipped (duplicates)")
+PYEOF
+}
+
+# ━━━ Knowledge: deduplicate entries in a profile ━━━
+dedup_knowledge() {
+    local index="${1:-}"
+    if [[ -z "$index" ]]; then
+        # Dedup all profiles
+        local i=1
+        local count
+        count=$(get_profile_count)
+        while (( i <= count )); do
+            dedup_single_knowledge "$i"
+            ((i++))
+        done
+        return
+    fi
+    dedup_single_knowledge "$index"
+}
+
+dedup_single_knowledge() {
+    local index="$1"
+    local line
+    line=$(get_profile_by_index "$index")
+    if [[ -z "$line" ]]; then
+        printf "%s\n" "${RED}Invalid profile #${index}${NC}"
+        return 1
+    fi
+
+    local name path email desc
+    IFS='|' read -r name path email desc <<< "$line"
+
+    local token
+    token=$(get_token_from_profile "$path")
+    if [[ -z "$token" ]]; then
+        printf "  %-12s ${YELLOW}SKIP (not logged in)${NC}\n" "$name"
+        return
+    fi
+
+    local kdata
+    kdata=$(api_list_knowledge "$token")
+
+    python3 << PYEOF
+import json, subprocess
+
+data = json.loads('''$kdata''')
+entries = data.get("knowledge", [])
+
+seen_names = {}
+duplicates = []
+for entry in entries:
+    ename = entry.get("name", "")
+    uid = entry.get("uid", "")
+    if ename in seen_names:
+        duplicates.append((uid, ename))
+    else:
+        seen_names[ename] = uid
+
+if not duplicates:
+    print(f"  $name: no duplicates found ({len(entries)} entries)")
+else:
+    for uid, ename in duplicates:
+        subprocess.run([
+            "curl", "-s", "-X", "POST",
+            "$MANUS_API/knowledge.v1.KnowledgeService/DeleteKnowledge",
+            "-H", "Authorization: Bearer $token",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps({"uid": uid})
+        ], capture_output=True, text=True)
+        print(f"  $name: \033[0;31mremoved\033[0m duplicate: {ename}")
+    print(f"  $name: {len(duplicates)} duplicates removed, {len(entries) - len(duplicates)} remain")
+PYEOF
+}
+
+# ━━━ Knowledge: remove entry by name from a profile ━━━
+rm_knowledge() {
+    local index="${1:?Usage: manus krm <profile#> <name>}"
+    local target_name="${2:?Knowledge name required}"
+    local line
+    line=$(get_profile_by_index "$index")
+    if [[ -z "$line" ]]; then
+        printf "%s\n" "${RED}Invalid profile #${index}${NC}"
+        return 1
+    fi
+
+    local name path email desc
+    IFS='|' read -r name path email desc <<< "$line"
+
+    local token
+    token=$(get_token_from_profile "$path")
+    if [[ -z "$token" ]]; then
+        printf "%s\n" "${RED}Profile '$name' not logged in.${NC}"
+        return 1
+    fi
+
+    local kdata
+    kdata=$(api_list_knowledge "$token")
+
+    python3 << PYEOF
+import json, subprocess
+
+data = json.loads('''$kdata''')
+target = "$target_name"
+deleted = 0
+for entry in data.get("knowledge", []):
+    if entry.get("name", "") == target:
+        uid = entry.get("uid", "")
+        subprocess.run([
+            "curl", "-s", "-X", "POST",
+            "$MANUS_API/knowledge.v1.KnowledgeService/DeleteKnowledge",
+            "-H", "Authorization: Bearer $token",
+            "-H", "Content-Type: application/json",
+            "-d", json.dumps({"uid": uid})
+        ], capture_output=True, text=True)
+        print(f"  \033[0;32mDeleted\033[0m: {target}")
+        deleted += 1
+if not deleted:
+    print(f"  \033[0;33mNot found\033[0m: {target}")
+PYEOF
+}
+
+# ━━━ Knowledge: auto-sync to target profile from richest source ━━━
+auto_sync_knowledge() {
+    local target_index="$1"
+    local target_line
+    target_line=$(get_profile_by_index "$target_index")
+    local target_path
+    IFS='|' read -r _ target_path _ _ <<< "$target_line"
+
+    local target_token
+    target_token=$(get_token_from_profile "$target_path")
+    if [[ -z "$target_token" ]]; then
+        return  # target not logged in yet, skip silently
+    fi
+
+    # Find the profile with the most knowledge entries
+    local best_index=0 best_count=0
+    local i=1
+    local count
+    count=$(get_profile_count)
+    while (( i <= count )); do
+        if (( i == target_index )); then
+            ((i++))
+            continue
+        fi
+        local line
+        line=$(get_profile_by_index "$i")
+        local spath
+        IFS='|' read -r _ spath _ _ <<< "$line"
+        local stoken
+        stoken=$(get_token_from_profile "$spath")
+        if [[ -n "$stoken" ]]; then
+            local sdata
+            sdata=$(api_list_knowledge "$stoken")
+            local stotal
+            stotal=$(echo "$sdata" | python3 -c "import json,sys; print(int(json.loads(sys.stdin.read()).get('total','0')))" 2>/dev/null)
+            if (( stotal > best_count )); then
+                best_count=$stotal
+                best_index=$i
+            fi
+        fi
+        ((i++))
+    done
+
+    if (( best_index == 0 || best_count == 0 )); then
+        return  # no source with knowledge
+    fi
+
+    # Sync from best source to target
+    local source_line
+    source_line=$(get_profile_by_index "$best_index")
+    local source_name source_path
+    IFS='|' read -r source_name source_path _ _ <<< "$source_line"
+    local source_token
+    source_token=$(get_token_from_profile "$source_path")
+    local source_data
+    source_data=$(api_list_knowledge "$source_token")
+    local target_data
+    target_data=$(api_list_knowledge "$target_token")
+
+    local imported
+    imported=$(python3 << PYEOF
+import json, subprocess
+
+source = json.loads('''$source_data''')
+target = json.loads('''$target_data''')
+target_names = {k.get("name", "") for k in target.get("knowledge", [])}
+
+count = 0
+for entry in source.get("knowledge", []):
+    name = entry.get("name", "")
+    if name in target_names:
+        continue
+    payload = json.dumps({
+        "name": name,
+        "content": entry.get("content", ""),
+        "trigger": entry.get("trigger", ""),
+    })
+    subprocess.run([
+        "curl", "-s", "-X", "POST",
+        "$MANUS_API/knowledge.v1.KnowledgeService/CreateKnowledge",
+        "-H", "Authorization: Bearer $target_token",
+        "-H", "Content-Type: application/json",
+        "-d", payload
+    ], capture_output=True, text=True)
+    count += 1
+print(count)
+PYEOF
+    )
+
+    if [[ "$imported" -gt 0 ]]; then
+        printf "%s\n" "${GREEN}Auto-synced ${imported} knowledge entries from '$source_name'${NC}"
+    fi
+}
+
+# ━━━ Knowledge: sync from one profile to all others ━━━
+sync_knowledge() {
+    local source_index="${1:?Usage: manus ksync <source_profile#>}"
+    local source_line
+    source_line=$(get_profile_by_index "$source_index")
+    if [[ -z "$source_line" ]]; then
+        printf "%s\n" "${RED}Invalid source profile #${source_index}${NC}"
+        return 1
+    fi
+
+    local source_name source_path
+    IFS='|' read -r source_name source_path _ _ <<< "$source_line"
+
+    local source_token
+    source_token=$(get_token_from_profile "$source_path")
+    if [[ -z "$source_token" ]]; then
+        printf "%s\n" "${RED}Source profile '$source_name' not logged in.${NC}"
+        return 1
+    fi
+
+    printf "%s\n" "${CYAN}=== Syncing knowledge from '$source_name' to all other profiles ===${NC}"
+
+    # Export source knowledge
+    local source_data
+    source_data=$(api_list_knowledge "$source_token")
+    local source_entries
+    source_entries=$(echo "$source_data" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(len(d.get('knowledge',[])))" 2>/dev/null)
+    printf "  Source: %s entries\n\n" "$source_entries"
+
+    if [[ "$source_entries" == "0" ]]; then
+        printf "%s\n" "${YELLOW}No knowledge to sync.${NC}"
+        return
+    fi
+
+    local i=1
+    local count
+    count=$(get_profile_count)
+    while (( i <= count )); do
+        if (( i == source_index )); then
+            ((i++))
+            continue
+        fi
+
+        local line
+        line=$(get_profile_by_index "$i")
+        local tname tpath
+        IFS='|' read -r tname tpath _ _ <<< "$line"
+
+        local ttoken
+        ttoken=$(get_token_from_profile "$tpath")
+        if [[ -z "$ttoken" ]]; then
+            printf "  %-12s ${YELLOW}SKIP (not logged in)${NC}\n" "$tname"
+            ((i++))
+            continue
+        fi
+
+        local existing
+        existing=$(api_list_knowledge "$ttoken")
+
+        python3 << PYEOF2
+import json, subprocess
+
+source = json.loads('''$source_data''')
+target = json.loads('''$existing''')
+target_names = {k.get("name", "") for k in target.get("knowledge", [])}
+
+imported = 0
+for entry in source.get("knowledge", []):
+    name = entry.get("name", "")
+    if name in target_names:
+        continue
+    payload = json.dumps({
+        "name": name,
+        "content": entry.get("content", ""),
+        "trigger": entry.get("trigger", ""),
+    })
+    subprocess.run([
+        "curl", "-s", "-X", "POST",
+        "$MANUS_API/knowledge.v1.KnowledgeService/CreateKnowledge",
+        "-H", "Authorization: Bearer $ttoken",
+        "-H", "Content-Type: application/json",
+        "-d", payload
+    ], capture_output=True, text=True)
+    imported += 1
+
+existing_count = len(target.get("knowledge", []))
+print(f"  {'$tname':12s}  \033[0;32m+{imported} new\033[0m  ({existing_count} existed)")
+PYEOF2
+        ((i++))
+    done
+    printf "\n%s\n" "${GREEN}Sync complete.${NC}"
+}
+
 # ━━━ Setup daily cron ━━━
 setup_cron() {
     local script_path
@@ -754,6 +1287,12 @@ case "${1:-}" in
     checkin)  daily_checkin ;;
     log)      checkin_log "${2:-20}" ;;
     cron)     setup_cron "${2:-}" ;;
+    knowledge|kn) show_knowledge "${2:-}" ;;
+    kexport)  export_knowledge "${2:-}" "${3:-}" ;;
+    kimport)  import_knowledge "${2:-}" "${3:-}" ;;
+    ksync)    sync_knowledge "${2:-}" ;;
+    kdedup)   dedup_knowledge "${2:-}" ;;
+    krm)      rm_knowledge "${2:-}" "${3:-}" ;;
     "")       interactive_pick ;;
     *)
         if [[ "$1" =~ ^[0-9]+$ ]]; then
@@ -772,6 +1311,13 @@ case "${1:-}" in
             printf "  %-14s %s\n" "cred N" "Show stored credentials"
             printf "  %-14s %s\n" "rm <name>" "Unregister profile"
             printf "  %-14s %s\n" "purge <name>" "Remove profile + data + keychain"
+            echo ""
+            printf "  ${BOLD}Knowledge sync:${NC}\n"
+            printf "  %-14s %s\n" "kn [N]" "Show knowledge entries"
+            printf "  %-14s %s\n" "kexport N" "Export knowledge to JSON"
+            printf "  %-14s %s\n" "kimport N file" "Import knowledge from JSON"
+            printf "  %-14s %s\n" "ksync N" "Sync knowledge from #N to all others"
+            printf "  %-14s %s\n" "kdedup [N]" "Remove duplicate knowledge entries"
             exit 1
         fi
         ;;
