@@ -20,6 +20,7 @@ Manus Desktop is an Electron app. Each "profile" gets its own isolated `--user-d
 - **Live credit balance** — via reverse-engineered Manus gRPC-JSON API (`GetAvailableCredits`)
 - **Account info** — plan type, subscription status, renewal date, token expiry
 - **Credentials in macOS Keychain** — passwords never stored in plaintext
+- **Knowledge sync** — export/import/sync learned preferences across accounts
 - **Daily auto-checkin** — cron job pings all accounts after daily credit refresh
 - **Side-by-side mode** — run multiple accounts simultaneously
 - **"My Computer" deviceId sync** — shared device identity across profiles
@@ -57,7 +58,18 @@ mn checkin          # Ping all accounts (triggers activity)
 mn cron             # Setup daily auto-checkin at 13:12
 mn watch            # Auto-refresh credit display every 30s
 mn watch 10         # Every 10s
+
+mn kn               # Show knowledge entries for all accounts
+mn kn 1             # Show knowledge for profile #1
+mn kexport 1        # Export knowledge to JSON file
+mn kimport 2 file   # Import knowledge from JSON into profile #2
+mn ksync 1          # Sync knowledge from #1 → all other profiles
+mn kdedup           # Remove duplicate knowledge entries (all profiles)
+mn kdedup 1         # Remove duplicates for profile #1 only
+mn krm 1 "name"     # Delete a specific knowledge entry by name
 ```
+
+> **Auto-sync**: When you switch profiles with `mn s<N>`, knowledge is automatically synced from the profile with the most entries. New accounts inherit your learned context without any manual steps.
 
 ## Manus API (reverse-engineered)
 
@@ -76,6 +88,26 @@ curl -s -X POST "https://api.manus.im/user.v1.UserService/UserInfo" \
 ```
 
 JWT tokens are stored in `~/Library/Application Support/Manus/localStorage.json`.
+
+### Knowledge API (reverse-engineered)
+
+```bash
+# List all knowledge entries
+curl -s -X POST "https://api.manus.im/knowledge.v1.KnowledgeService/ListKnowledge" \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" -d '{"limit": 100}'
+
+# Create a knowledge entry
+curl -s -X POST "https://api.manus.im/knowledge.v1.KnowledgeService/CreateKnowledge" \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"...", "content":"...", "trigger":"..."}'
+
+# Delete a knowledge entry
+curl -s -X POST "https://api.manus.im/knowledge.v1.KnowledgeService/DeleteKnowledge" \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" -d '{"uid":"..."}'
+```
 
 ## Requirements
 
