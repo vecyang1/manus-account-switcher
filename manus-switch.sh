@@ -142,18 +142,116 @@ api_get_user_info() {
         -d '{}' 2>/dev/null
 }
 
+# ━━━ Async credit display helpers ━━━
+_CREDIT_TMPDIR=""
+_CREDIT_BG_PID=""
+
+_cleanup_credit() {
+    if [[ -n "$_CREDIT_BG_PID" ]]; then
+        kill "$_CREDIT_BG_PID" 2>/dev/null
+        wait "$_CREDIT_BG_PID" 2>/dev/null
+        _CREDIT_BG_PID=""
+    fi
+    if [[ -n "$_CREDIT_TMPDIR" ]]; then
+        rm -rf "$_CREDIT_TMPDIR"
+        _CREDIT_TMPDIR=""
+    fi
+}
+
+# Background job: poll for curl results, then overwrite "..." placeholders via ANSI
+_start_credit_bg() {
+    local tmpdir="$_CREDIT_TMPDIR"
+    local menu_lines="$1"
+    [[ -f "$tmpdir/_cpos" ]] || return
+
+    local profile_lc
+    profile_lc=$(cat "$tmpdir/_lc")
+
+    (
+        # Poll until all credit files exist or timeout (8s)
+        local deadline=$((SECONDS + 8))
+        while (( SECONDS < deadline )); do
+            local all_done=true
+            while read -r idx pos; do
+                [[ -s "$tmpdir/${idx}_credits" ]] || { all_done=false; break; }
+            done < "$tmpdir/_cpos"
+            $all_done && break
+            sleep 0.2
+        done
+
+        # Update each credit line in-place
+        while read -r idx pos; do
+            if [[ -s "$tmpdir/${idx}_credits" ]]; then
+                local up=$(( profile_lc + menu_lines - pos ))
+                local credit_text
+                credit_text=$(python3 -c "
+import json
+with open('$tmpdir/${idx}_credits') as f: c = json.load(f)
+u = {}
+try:
+    with open('$tmpdir/${idx}_userinfo') as f: u = json.load(f)
+except: pass
+total = c.get('totalCredits', 0)
+refresh = c.get('refreshCredits', 0)
+mx = c.get('maxRefreshCredits', 0)
+balance = total - refresh
+plan = ''
+if u:
+    plan = u.get('membershipVersion','free').upper() + ' (' + u.get('subscriptionStatus','').replace('SubscriptionStatus','') + ')'
+print(f'\033[0;32m{balance} credits | daily: {refresh}/{mx} left\033[0m  \033[2m{plan}\033[0m')
+" 2>/dev/null)
+                if [[ -n "$credit_text" ]]; then
+                    # save cursor → move up → col 1 → print → clear EOL → restore cursor
+                    printf "\033[s\033[%dA\r      %14s%s\033[K\033[u" "$up" "" "$credit_text"
+                fi
+            fi
+        done < "$tmpdir/_cpos"
+    ) &
+    _CREDIT_BG_PID=$!
+}
+
 # ━━━ List profiles ━━━
+# mode: "sync" (default) = wait for credits inline; "async" = show placeholders
 list_profiles() {
+    local mode="${1:-sync}"
+    _cleanup_credit
+    _CREDIT_TMPDIR=$(mktemp -d)
+    local tmpdir="$_CREDIT_TMPDIR"
+
+    # Spawn ALL API calls in parallel
     local i=1
+    while IFS='|' read -r name path email desc; do
+        local token
+        token=$(get_token_from_profile "$path")
+        if [[ -n "$token" ]]; then
+            api_get_credits "$token" > "$tmpdir/${i}_credits" 2>/dev/null &
+            api_get_user_info "$token" > "$tmpdir/${i}_userinfo" 2>/dev/null &
+        fi
+        ((i++))
+    done < "$PROFILES_CONF"
+
+    # In sync mode, wait before display so credits are ready
+    [[ "$mode" == "sync" ]] && wait
+
     printf "\n%s\n" "${BOLD}${CYAN}======= Manus Account Manager =======${NC}"
     echo ""
+
+    local lc=0  # line counter for async credit positioning
+    i=1
     while IFS='|' read -r name path email desc; do
         local login_status="" token_info=""
 
-        # Check login status from token
         token_info=$(parse_token_info "$path")
         if [[ "$token_info" == "NO_TOKEN" ]]; then
-            login_status="${YELLOW}[fresh]${NC}"
+            local created=""
+            if [[ -d "$path" ]]; then
+                created=$(stat -f "%SB" -t "%Y-%m-%d" "$path" 2>/dev/null)
+            fi
+            if [[ -n "$created" ]]; then
+                login_status="${YELLOW}[fresh]${NC} added ${created}"
+            else
+                login_status="${YELLOW}[fresh]${NC}"
+            fi
         else
             IFS='|' read -r tstatus temail tname tuid texp tdays <<< "$token_info"
             if [[ "$tstatus" == "VALID" ]]; then
@@ -166,7 +264,6 @@ list_profiles() {
             fi
         fi
 
-        # Check if password is stored
         local has_pwd=""
         if [[ -n "$email" ]]; then
             local pwd
@@ -177,40 +274,60 @@ list_profiles() {
         fi
 
         printf "  ${BLUE}%2d${NC}  %-12s  %s\n" "$i" "$name" "$login_status"
+        ((lc++))
         if [[ -n "$email" ]]; then
             printf "      %14s%s%s\n" "" "$email" "$has_pwd"
+            ((lc++))
         fi
         if [[ -n "$desc" ]]; then
             printf "      %14s${DIM}%s${NC}\n" "" "$desc"
+            ((lc++))
         fi
 
-        # Quick credit check for logged-in profiles
+        # Credit line
         local token
         token=$(get_token_from_profile "$path")
         if [[ -n "$token" ]]; then
-            local cred_json
-            cred_json=$(api_get_credits "$token" 2>/dev/null)
-            if [[ -n "$cred_json" ]]; then
-                local credit_line
+            if [[ "$mode" == "sync" && -s "$tmpdir/${i}_credits" ]]; then
+                # Sync: credits already fetched, display inline
+                local credit_line plan
                 credit_line=$(python3 -c "
 import json
-c = json.loads('''$cred_json''')
+with open('$tmpdir/${i}_credits') as f: c = json.load(f)
 total = c.get('totalCredits', 0)
 refresh = c.get('refreshCredits', 0)
 mx = c.get('maxRefreshCredits', 0)
 balance = total - refresh
 print(f'{balance} credits | daily: {refresh}/{mx} left')
 " 2>/dev/null)
-                local uinfo plan
-                uinfo=$(api_get_user_info "$token" 2>/dev/null)
-                plan=$(echo "$uinfo" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('membershipVersion','free').upper() + ' (' + d.get('subscriptionStatus','').replace('SubscriptionStatus','') + ')')" 2>/dev/null)
+                plan=$(python3 -c "
+import json
+try:
+    with open('$tmpdir/${i}_userinfo') as f: u = json.load(f)
+    print(u.get('membershipVersion','free').upper() + ' (' + u.get('subscriptionStatus','').replace('SubscriptionStatus','') + ')')
+except: print('')
+" 2>/dev/null)
                 printf "      %14s${GREEN}%s${NC}  ${DIM}%s${NC}\n" "" "$credit_line" "$plan"
+            else
+                # Async: placeholder, record position for background update
+                echo "$i $lc" >> "$tmpdir/_cpos"
+                printf "      %14s${DIM}...${NC}\n" ""
             fi
+            ((lc++))
         fi
 
         echo ""
+        ((lc++))
         ((i++))
     done < "$PROFILES_CONF"
+
+    echo "$lc" > "$tmpdir/_lc"
+
+    # Sync mode: done, clean up
+    if [[ "$mode" == "sync" ]]; then
+        rm -rf "$tmpdir"
+        _CREDIT_TMPDIR=""
+    fi
 }
 
 # ━━━ Account info (detailed) ━━━
@@ -538,10 +655,11 @@ switch_profile() {
 
 # ━━━ Interactive menu ━━━
 interactive_pick() {
-    list_profiles
+    list_profiles async
     local count
     count=$(get_profile_count)
 
+    # Menu: 9 lines (must match menu_lines passed to _start_credit_bg)
     printf "  Commands:\n"
     printf "    ${BLUE}1-%s${NC}     Launch profile (new window, keeps current)\n" "$count"
     printf "    ${BLUE}s1-%s${NC}    Switch (close all, open one)\n" "$count"
@@ -551,7 +669,14 @@ interactive_pick() {
     printf "    ${BLUE}a${NC}       Add new account\n"
     printf "    ${BLUE}q${NC}       Quit\n"
     echo ""
+
+    # Start background job that fills in "..." credit placeholders via ANSI
+    _start_credit_bg 9
+
     read -rp "  > " choice
+
+    # User made a choice — kill background updater, clean up
+    _cleanup_credit
 
     case "$choice" in
         q|Q) exit 0 ;;
