@@ -18,6 +18,8 @@ MANUS_APP="/Applications/Manus.app"
 PROFILES_DIR="$HOME/.manus-profiles"
 PROFILES_CONF="$PROFILES_DIR/.profiles"
 KEYCHAIN_SERVICE="manus-switch"
+MANUS_DATA_DIR="$HOME/Library/Application Support/Manus"
+DEFAULT_PROFILE_DIR="$PROFILES_DIR/default"
 
 # Colors — use $'...' so escape chars are real bytes, not literal \033
 RED=$'\033[0;31m'
@@ -148,8 +150,10 @@ _CREDIT_BG_PID=""
 
 _cleanup_credit() {
     if [[ -n "$_CREDIT_BG_PID" ]]; then
-        kill "$_CREDIT_BG_PID" 2>/dev/null
-        wait "$_CREDIT_BG_PID" 2>/dev/null
+        # || true: if the BG job already finished, wait returns 127 and `set -e`
+        # would kill the whole script right before the user's menu choice runs.
+        kill "$_CREDIT_BG_PID" 2>/dev/null || true
+        wait "$_CREDIT_BG_PID" 2>/dev/null || true
         _CREDIT_BG_PID=""
     fi
     if [[ -n "$_CREDIT_TMPDIR" ]]; then
@@ -557,7 +561,9 @@ launch_profile() {
     printf "%s\n" "${GREEN}Launching Manus as '$name'...${NC}"
     [[ -n "$email" ]] && printf "  %s\n" "$email"
 
-    if [[ "$name" == "default" ]]; then
+    # Always use --user-data-dir when launching a separate window, except the
+    # pre-migration default case where the profile path IS the app's natural dir.
+    if [[ "$path" == "$MANUS_DATA_DIR" ]]; then
         open -n -a "$MANUS_APP" &
     else
         open -n -a "$MANUS_APP" --args --user-data-dir="$path" &
@@ -583,7 +589,16 @@ launch_profile() {
 # ━━━ Sync deviceId so "My Computer" works across profiles ━━━
 sync_device_id() {
     local target_path="$1"
-    local default_ls="$HOME/Library/Application Support/Manus/localStorage.json"
+
+    # Look up default profile's real path from PROFILES_CONF. After the symlink
+    # migration, this lives at $DEFAULT_PROFILE_DIR, not at $MANUS_DATA_DIR
+    # (which has become a symlink pointing at whichever profile is active).
+    local default_line default_path
+    default_line=$(get_profile_by_name "default")
+    [[ -z "$default_line" ]] && return
+    default_path=$(echo "$default_line" | cut -d'|' -f2)
+
+    local default_ls="$default_path/localStorage.json"
     local target_ls="$target_path/localStorage.json"
 
     if [[ ! -f "$default_ls" || ! -f "$target_ls" ]]; then
@@ -605,7 +620,61 @@ with open('$target_ls', 'w') as f: json.dump(d, f)
 " 2>/dev/null
 }
 
-# ━━━ Switch profile (close all, open one) ━━━
+# ━━━ Migrate default profile to symlink layout ━━━
+# Moves ~/Library/Application Support/Manus → ~/.manus-profiles/default and
+# replaces the original with a symlink. The switch command then retargets
+# the symlink on every switch, so Manus opened normally (Dock/Spotlight)
+# always shows whichever profile is currently active. Idempotent.
+migrate_to_symlink_layout() {
+    [[ -L "$MANUS_DATA_DIR" ]] && return 0
+
+    if pgrep -f "Manus.app" >/dev/null 2>&1; then
+        printf "%s\n" "${YELLOW}⚠ Close Manus before symlink migration can run.${NC}" >&2
+        return 1
+    fi
+
+    # First time and no existing data: just create empty default + symlink
+    if [[ ! -e "$MANUS_DATA_DIR" ]]; then
+        mkdir -p "$DEFAULT_PROFILE_DIR"
+        ln -s "$DEFAULT_PROFILE_DIR" "$MANUS_DATA_DIR"
+        return 0
+    fi
+
+    if [[ -e "$DEFAULT_PROFILE_DIR" ]]; then
+        printf "%s\n" "${RED}✗ $DEFAULT_PROFILE_DIR already exists; manual cleanup needed.${NC}" >&2
+        return 1
+    fi
+
+    printf "%s\n" "${CYAN}→ Migrating default data to ${DEFAULT_PROFILE_DIR} (one-time)${NC}" >&2
+    if ! mv "$MANUS_DATA_DIR" "$DEFAULT_PROFILE_DIR"; then
+        printf "%s\n" "${RED}✗ mv failed.${NC}" >&2
+        return 1
+    fi
+    if ! ln -s "$DEFAULT_PROFILE_DIR" "$MANUS_DATA_DIR"; then
+        printf "%s\n" "${RED}✗ Failed to create symlink.${NC}" >&2
+        return 1
+    fi
+
+    # Rewrite PROFILES_CONF so the default profile's path points at the new location.
+    python3 - "$PROFILES_CONF" "$DEFAULT_PROFILE_DIR" <<'PYEOF' 2>/dev/null || true
+import sys
+conf_path, new_path = sys.argv[1], sys.argv[2]
+with open(conf_path) as f:
+    lines = f.read().splitlines()
+with open(conf_path, 'w') as f:
+    for line in lines:
+        parts = line.split('|', 3)
+        if parts and parts[0] == 'default' and len(parts) >= 2:
+            parts[1] = new_path
+            line = '|'.join(parts)
+        f.write(line + '\n')
+PYEOF
+
+    printf "%s\n" "${GREEN}✓ Migration complete — switch now persists across app reopens.${NC}" >&2
+    return 0
+}
+
+# ━━━ Switch profile (close all, open one; persists across app reopens) ━━━
 switch_profile() {
     local index="$1"
     local line
@@ -618,11 +687,6 @@ switch_profile() {
     local name path email desc
     IFS='|' read -r name path email desc <<< "$line"
 
-    # Sync deviceId for My Computer
-    if [[ "$name" != "default" ]]; then
-        sync_device_id "$path"
-    fi
-
     printf "%s\n" "${YELLOW}Closing all Manus instances...${NC}"
     osascript -e 'quit app "Manus"' 2>/dev/null || true
     sleep 2
@@ -630,11 +694,39 @@ switch_profile() {
     pkill -f "Manus.app" 2>/dev/null || true
     sleep 1
 
+    # One-time migration to symlink layout (no-op on subsequent calls).
+    # This is what makes the switch actually persist when Manus is later
+    # reopened normally from Dock/Spotlight.
+    migrate_to_symlink_layout || true
+
+    # Re-read the target line: migration may have updated the default profile's path.
+    line=$(get_profile_by_index "$index")
+    IFS='|' read -r name path email desc <<< "$line"
+
+    # Sync deviceId for My Computer (uses updated default path from PROFILES_CONF)
+    if [[ "$name" != "default" ]]; then
+        sync_device_id "$path"
+    fi
+
+    # Retarget the symlink at MANUS_DATA_DIR so "normal" Manus launches pick up
+    # this profile. If migration failed (e.g. Manus still running), we fall
+    # through to the old --user-data-dir path below.
+    if [[ -L "$MANUS_DATA_DIR" ]]; then
+        rm "$MANUS_DATA_DIR"
+        ln -s "$path" "$MANUS_DATA_DIR"
+    fi
+
     printf "%s\n" "${GREEN}Launching Manus as '$name'...${NC}"
-    if [[ "$name" == "default" ]]; then
+    if [[ -L "$MANUS_DATA_DIR" ]]; then
+        # Symlink layout: opening Manus normally = currently-active profile
         open -a "$MANUS_APP" &
     else
-        open -a "$MANUS_APP" --args --user-data-dir="$path" &
+        # Fallback (migration failed) — legacy behavior, does NOT persist on reopen
+        if [[ "$name" == "default" ]]; then
+            open -a "$MANUS_APP" &
+        else
+            open -a "$MANUS_APP" --args --user-data-dir="$path" &
+        fi
     fi
 
     printf "%s\n" "${CYAN}Switched to: $name ($email)${NC}"
