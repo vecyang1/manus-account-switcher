@@ -2,3 +2,16 @@
 *.log
 .DS_Store
 electron-reverse-engineer.skill
+
+# Local private files and indices
+graphify-out/
+PROJECT_LINKS.md
+VAULT.md
+decisions.md
+progress.md
+task_plan.md
+handoff.md
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+
